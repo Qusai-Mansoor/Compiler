@@ -162,20 +162,37 @@ void AST::assignIds() {
 
 // Assign IDs to object nodes
 int ObjectNode::assignIds(int nextId, std::map<std::string, int>& tableIds) {
-    // Set this object's ID
+    // Determine table name from parent key or use default
+    if (parentTable.empty()) {
+        tableName = "root"; // Root object
+    } else if (!parentKey.empty()) {
+        tableName = parentKey; // Use the key from parent
+    } else {
+        std::stringstream ss;
+        ss << parentTable << "_" << nextId; // Fallback name
+        tableName = ss.str();
+    }
+    
+    // Assign ID
     id = nextId++;
     
-    // Iterate through all key-value pairs
+    // Process all key-value pairs
     for (auto& pair : pairs) {
-        // Process values within this object
-        nextId = pair.value->assignIds(nextId, tableIds);
-        
-        // Set parent information for arrays
-        if (pair.value->getType() == NodeType::ARRAY) {
+        if (pair.value->getType() == NodeType::OBJECT) {
+            // Handle nested object
+            auto objectNode = std::dynamic_pointer_cast<ObjectNode>(pair.value);
+            objectNode->parentId = id;
+            objectNode->parentTable = tableName;
+            objectNode->parentKey = pair.key;
+            nextId = objectNode->assignIds(nextId, tableIds);
+        } 
+        else if (pair.value->getType() == NodeType::ARRAY) {
+            // Handle array
             auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(pair.value);
             arrayNode->parentId = id;
-            arrayNode->parentKey = pair.key;
             arrayNode->parentTable = tableName;
+            arrayNode->parentKey = pair.key;
+            nextId = arrayNode->assignIds(nextId, tableIds);
         }
     }
     
@@ -184,18 +201,33 @@ int ObjectNode::assignIds(int nextId, std::map<std::string, int>& tableIds) {
 
 // Assign IDs to array nodes
 int ArrayNode::assignIds(int nextId, std::map<std::string, int>& tableIds) {
-    // Process each element in the array
-    for (size_t i = 0; i < elements.size(); ++i) {
-        // If element is an object, set its parent info
-        if (elements[i]->getType() == NodeType::OBJECT) {
-            auto objNode = std::dynamic_pointer_cast<ObjectNode>(elements[i]);
-            objNode->parentId = parentId;
-            objNode->parentTable = parentTable;
+    // If array contains objects, we need to process them
+    if (isArrayOfObjects()) {
+        // Process each object element
+        int index = 0;
+        for (auto& element : elements) {
+            if (element->getType() == NodeType::OBJECT) {
+                auto objectNode = std::dynamic_pointer_cast<ObjectNode>(element);
+                objectNode->parentId = parentId;
+                objectNode->parentTable = parentTable;
+                
+                // If no parent key is set, use a numeric index
+                if (parentKey.empty()) {
+                    std::stringstream ss;
+                    ss << "item_" << index;
+                    objectNode->parentKey = ss.str();
+                } else {
+                    objectNode->parentKey = parentKey + "_" + std::to_string(index);
+                }
+                
+                nextId = objectNode->assignIds(nextId, tableIds);
+            }
+            index++;
         }
-        
-        // Process the element
-        nextId = elements[i]->assignIds(nextId, tableIds);
     }
+    
+    // For scalar arrays, we don't need to assign IDs to the elements
+    // They will be handled by the CSV generator
     
     return nextId;
 }

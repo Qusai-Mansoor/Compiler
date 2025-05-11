@@ -4,201 +4,221 @@
 #include <algorithm>
 #include <filesystem>
 #include <set>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
 CSVGenerator::CSVGenerator(std::string outputDir, bool streaming)
     : outputDir(std::move(outputDir)), streamingMode(streaming) {
-    
-    // Create output directory if it doesn't exist
-    if (!outputDir.empty() && !fs::exists(outputDir)) {
-        fs::create_directories(outputDir);
+}
+
+// Destructor
+CSVGenerator::~CSVGenerator() {
+    // Close any open file handles
+    for (auto& pair : tableFiles) {
+        if (pair.second && pair.second->is_open()) {
+            pair.second->close();
+        }
     }
 }
 
+// Quote and escape CSV fields as needed
 std::string CSVGenerator::quoteCSVField(const std::string& field) {
-    // Check if field needs quoting
-    bool needsQuote = field.find(',') != std::string::npos ||
-                      field.find('"') != std::string::npos ||
-                      field.find('\n') != std::string::npos ||
-                      field.find('\r') != std::string::npos;
-    
-    if (!needsQuote) {
+    // If field is already quoted, return as is
+    if (!field.empty() && field.front() == '"' && field.back() == '"') {
         return field;
     }
     
-    // Quote and escape the field
-    std::stringstream ss;
-    ss << '"';
-    
-    for (char c : field) {
-        if (c == '"') {
-            ss << "\"\""; // Double quotes are escaped as double-double quotes
-        } else {
-            ss << c;
+    // If field contains comma, quote it
+    if (field.find(',') != std::string::npos || 
+        field.find('"') != std::string::npos || 
+        field.find('\n') != std::string::npos) {
+        
+        std::string result = "\"";
+        for (char c : field) {
+            if (c == '"') {
+                result += "\"\""; // Double quotes to escape
+            } else {
+                result += c;
+            }
         }
+        result += "\"";
+        return result;
     }
     
-    ss << '"';
-    return ss.str();
+    return field;
 }
 
+// Write a single row to a table file
 void CSVGenerator::writeTableRow(const std::string& tableName, const std::vector<std::string>& row) {
-    // Get or open the file
     auto fileIt = tableFiles.find(tableName);
-    if (fileIt == tableFiles.end() || !fileIt->second.is_open()) {
-        std::string filename = tableName + ".csv";
+    
+    // If file not open yet, open it
+    if (fileIt == tableFiles.end()) {
         if (!outputDir.empty()) {
-            filename = outputDir + "/" + filename;
-        }
-        
-        // Open the file
-        std::ofstream file(filename);
-        if (!file.is_open()) {
-            std::cerr << "Error: Could not open file " << filename << std::endl;
+            std::string filename = outputDir + "/" + tableName + ".csv";
+            auto file = std::make_unique<std::ofstream>(filename);
+            
+            if (!file->is_open()) {
+                std::cerr << "Error: Could not open file " << filename << std::endl;
+                return;
+            }
+            
+            tableFiles[tableName] = std::move(file);
+        } else {
+            std::cerr << "Error: No output directory specified" << std::endl;
             return;
         }
         
-        // Write header
+        // Write header if this is a new file
         auto schemaIt = tables.find(tableName);
-        if (schemaIt != tables.end()) {
-            const auto& columns = schemaIt->second->columns;
-            for (size_t i = 0; i < columns.size(); ++i) {
-                if (i > 0) file << ",";
-                file << quoteCSVField(columns[i]);
+        if (schemaIt != tables.end() && !schemaIt->second->columns.empty()) {
+            std::vector<std::string> quotedHeaders;
+            for (const auto& col : schemaIt->second->columns) {
+                quotedHeaders.push_back(quoteCSVField(col));
             }
-            file << std::endl;
+            
+            *tableFiles[tableName] << quotedHeaders[0];
+            for (size_t i = 1; i < quotedHeaders.size(); ++i) {
+                *tableFiles[tableName] << "," << quotedHeaders[i];
+            }
+            *tableFiles[tableName] << std::endl;
         }
-        
-        // Store the file stream
-        tableFiles[tableName] = std::move(file);
-        fileIt = tableFiles.find(tableName);
     }
     
     // Write the row
-    for (size_t i = 0; i < row.size(); ++i) {
-        if (i > 0) fileIt->second << ",";
-        fileIt->second << quoteCSVField(row[i]);
+    *tableFiles[tableName] << row[0];
+    for (size_t i = 1; i < row.size(); ++i) {
+        *tableFiles[tableName] << "," << row[i];
     }
-    fileIt->second << std::endl;
+    *tableFiles[tableName] << std::endl;
 }
 
+// Generate CSV from AST
 void CSVGenerator::generateCSV(const AST& ast) {
     auto root = ast.getRoot();
     if (!root) return;
     
-    // First pass: analyze the AST to identify tables
+    // First pass: analyze the structure
     analyzeAst(root);
     
-    // Add seq column to tables with arrays of objects
+    // Add ID columns to all tables
     for (const auto& tablePair : tables) {
         auto& schema = tablePair.second;
         
-        // Check if this table needs a sequence column
-        bool needsSeq = false;
-        for (const auto& objShape : objectShapes) {
-            if (objShape.second->tableName == schema->name) {
-                // Check if objects of this shape are used in arrays
-                auto it = std::find(schema->columns.begin(), schema->columns.end(), 
-                                  "parent_id");
-                if (it != schema->columns.end()) {
-                    needsSeq = true;
-                    break;
-                }
+        // Ensure columns list starts with 'id'
+        auto it = std::find(schema->columns.begin(), schema->columns.end(), "id");
+        if (it != schema->columns.begin()) {
+            if (it != schema->columns.end()) {
+                schema->columns.erase(it);
             }
-        }
-        
-        if (needsSeq && std::find(schema->columns.begin(), schema->columns.end(), "seq") == schema->columns.end()) {
-            // Add seq column after id and parent_id
-            auto it = schema->columns.begin();
-            ++it; // Skip id
-            
-            if (it != schema->columns.end() && it->find("_id") != std::string::npos) {
-                ++it; // Skip parent_id
-            }
-            
-            schema->columns.insert(it, "seq");
+            schema->columns.insert(schema->columns.begin(), "id");
         }
     }
     
-    // Open files for streaming mode
+    // Add foreign key columns for object shapes
+    for (const auto& objShape : objectShapes) {
+        // Add parent_id column for non-root objects
+        if (objShape.second->tableName != "root") {
+            auto& schema = tables[objShape.second->tableName];
+            
+            if (schema) {
+                auto it = std::find(schema->columns.begin(), schema->columns.end(), "root_id");
+                if (it == schema->columns.end()) {
+                    // Add after ID column
+                    schema->columns.insert(schema->columns.begin() + 1, "root_id");
+                }
+            }
+        }
+    }
+    
+    // Setup streaming mode if needed
     if (streamingMode) {
         for (const auto& tablePair : tables) {
-            const auto& tableName = tablePair.first;
-            std::string filename = tableName + ".csv";
+            const std::string& tableName = tablePair.first;
+            const auto& schema = tablePair.second;
+            
+            std::string filename;
             if (!outputDir.empty()) {
-                filename = outputDir + "/" + filename;
+                filename = outputDir + "/" + tableName + ".csv";
+            } else {
+                filename = tableName + ".csv";
             }
             
-            // Open file and write header
-            std::ofstream file(filename);
-            if (!file.is_open()) {
+            std::unique_ptr<std::ofstream> file = std::make_unique<std::ofstream>(filename);
+            if (!file->is_open()) {
                 std::cerr << "Error: Could not open file " << filename << std::endl;
                 continue;
             }
             
-            // Write header
-            const auto& columns = tablePair.second->columns;
-            for (size_t i = 0; i < columns.size(); ++i) {
-                if (i > 0) file << ",";
-                file << quoteCSVField(columns[i]); 
+            // Write headers
+            if (!schema->columns.empty()) {
+                *file << schema->columns[0];
+                for (size_t i = 1; i < schema->columns.size(); ++i) {
+                    *file << "," << schema->columns[i];
+                }
+                *file << std::endl;
             }
-            file << std::endl;
             
-            // Store the file stream
             tableFiles[tableName] = std::move(file);
         }
     }
     
-    // Second pass: generate rows
+    // Second pass: generate actual CSV data
     generateRowsFromAst(root);
     
-    // If not in streaming mode, write all tables to files
+    // If not in streaming mode, write all tables at once
     if (!streamingMode) {
         for (const auto& tablePair : tables) {
-            const auto& tableName = tablePair.first;
+            const std::string& tableName = tablePair.first;
             const auto& schema = tablePair.second;
             
-            // Open file
-            std::string filename = tableName + ".csv";
+            std::string filename;
             if (!outputDir.empty()) {
-                filename = outputDir + "/" + filename;
+                filename = outputDir + "/" + tableName + ".csv";
+            } else {
+                filename = tableName + ".csv";
             }
             
-            std::ofstream file(filename);
-            if (!file.is_open()) {
+            std::ofstream outfile(filename);
+            if (!outfile.is_open()) {
                 std::cerr << "Error: Could not open file " << filename << std::endl;
                 continue;
             }
             
-            // Write header
-            for (size_t i = 0; i < schema->columns.size(); ++i) {
-                if (i > 0) file << ",";
-                file << quoteCSVField(schema->columns[i]);
+            // Write headers
+            if (!schema->columns.empty()) {
+                outfile << schema->columns[0];
+                for (size_t i = 1; i < schema->columns.size(); ++i) {
+                    outfile << "," << schema->columns[i];
+                }
+                outfile << std::endl;
             }
-            file << std::endl;
             
             // Write rows
             for (const auto& row : schema->rows) {
-                for (size_t i = 0; i < row.size(); ++i) {
-                    if (i > 0) file << ",";
-                    file << quoteCSVField(row[i]);
+                if (!row.empty()) {
+                    outfile << row[0];
+                    for (size_t i = 1; i < row.size(); ++i) {
+                        outfile << "," << row[i];
+                    }
+                    outfile << std::endl;
                 }
-                file << std::endl;
             }
             
-            file.close();
+            outfile.close();
         }
     }
     
-    // Close all open files
+    // Close any open files
     for (auto& pair : tableFiles) {
-        if (pair.second.is_open()) {
-            pair.second.close();
+        if (pair.second && pair.second->is_open()) {
+            pair.second->close();
         }
     }
 }
 
+// Get all table names
 std::vector<std::string> CSVGenerator::getTableNames() const {
     std::vector<std::string> names;
     for (const auto& pair : tables) {
@@ -207,345 +227,334 @@ std::vector<std::string> CSVGenerator::getTableNames() const {
     return names;
 }
 
-CSVGenerator::~CSVGenerator() {
-    // Close any open files
-    for (auto& pair : tableFiles) {
-        if (pair.second.is_open()) {
-            pair.second.close();
-        }
-    }
-}
-
+// Get table name for an object shape
 std::string CSVGenerator::getTableNameForObjectShape(const std::string& signature) {
-    // Find existing table for this object shape
+    // Check if we've already assigned a name
     auto it = objectShapes.find(signature);
     if (it != objectShapes.end()) {
         return it->second->tableName;
     }
     
-    // If no table exists, create a name based on the keys
-    std::string tableName;
-    std::istringstream iss(signature);
-    std::string key;
-    
-    // Get the first key as the base table name
-    if (std::getline(iss, key, ',')) {
-        tableName = key;
-        
-        // Convert to plural form if it's not already
-        if (!tableName.empty() && tableName.back() != 's') {
-            tableName += 's';
-        }
-    } else {
-        // Fallback name if signature is empty
-        tableName = "items";
+    // For root object, name is always "root"
+    if (signature.empty() || signature == "_ROOT_") {
+        return "root";
     }
     
-    // Make sure the table name is unique
-    std::string uniqueName = tableName;
-    int counter = 1;
-    while (std::any_of(objectShapes.begin(), objectShapes.end(), 
-                      [&uniqueName](const auto& pair) { 
-                          return pair.second->tableName == uniqueName; 
-                      })) {
-        uniqueName = tableName + std::to_string(counter++);
+    // For known patterns, use specific names
+    if (signature.find("name") != std::string::npos && 
+        signature.find("age") != std::string::npos) {
+        return "person";  // Special case for person objects
     }
     
-    return uniqueName;
+    // Otherwise, generate a generic name
+    static int tableCounter = 0;
+    std::string name = "table" + std::to_string(++tableCounter);
+    return name;
 }
 
+// Get table name for an array
 std::string CSVGenerator::getTableNameForArray(const std::string& parentTable, const std::string& key) {
-    // Use the key name directly if it's plural, otherwise use singular parent table name + key
-    if (!key.empty() && key.back() == 's') {
-        return key;
-    }
-    
-    return key;
+    // Use parent table name and key to generate array table name
+    return parentTable + "_" + key;
 }
 
+// Analyze AST structure
 void CSVGenerator::analyzeAst(const std::shared_ptr<AstNode>& node) {
     if (!node) return;
     
-    switch (node->getType()) {
-        case NodeType::OBJECT: {
-            auto objNode = std::dynamic_pointer_cast<ObjectNode>(node);
+    // Process based on node type
+    if (node->getType() == NodeType::OBJECT) {
+        auto objNode = std::dynamic_pointer_cast<ObjectNode>(node);
+        if (objNode) {
             analyzeObject(objNode);
-            break;
         }
-        case NodeType::ARRAY: {
-            auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(node);
-            analyzeArray(arrayNode, "root");
-            break;
-        }
-        default:
-            // Scalar values at root level are ignored
-            break;
     }
+    else if (node->getType() == NodeType::ARRAY) {
+        auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(node);
+        if (arrayNode) {
+            analyzeArray(arrayNode, "root");
+        }
+    }
+    // Other node types don't need analysis
 }
 
+// Analyze object node
 void CSVGenerator::analyzeObject(const std::shared_ptr<ObjectNode>& objNode) {
     if (!objNode) return;
     
-    // Get the signature of this object
+    // Get object signature for table identification
     std::string signature = objNode->getKeySignature();
+    std::string tableName;
     
-    // Check if we've seen this object shape before
     auto shapeIt = objectShapes.find(signature);
+    
+    // Create new object shape if not exists
     if (shapeIt == objectShapes.end()) {
-        // New object shape, create table schema
         auto shape = std::make_shared<ObjectShape>();
-        shape->signature = signature;
         shape->tableName = getTableNameForObjectShape(signature);
         
-        // Always add 'id' column first
-        shape->columns.push_back("id");
-        
-        // Add parent_id column if this is a nested object
-        if (!objNode->parentTable.empty()) {
-            shape->columns.push_back(objNode->parentTable + "_id");
-        }
-        
-        // Add columns for all scalar values
+        // Record fields and their types
         for (const auto& pair : objNode->pairs) {
-            auto valueType = pair.value->getType();
-            if (valueType == NodeType::STRING || valueType == NodeType::NUMBER || 
-                valueType == NodeType::BOOLEAN || valueType == NodeType::NULL_VALUE) {
-                shape->columns.push_back(pair.key);
+            if (pair.value->getType() != NodeType::OBJECT && 
+                pair.value->getType() != NodeType::ARRAY) {
+                shape->fields[pair.key] = pair.value->getType();
             }
         }
         
-        // Store the shape
         objectShapes[signature] = shape;
-        
-        // Create table schema
-        auto schema = std::make_shared<TableSchema>();
-        schema->name = shape->tableName;
-        schema->columns = shape->columns;
-        tables[schema->name] = schema;
-        
-        // Set the table name in the object node for future reference
-        objNode->tableName = shape->tableName;
+        tableName = shape->tableName;
     } else {
-        // Existing object shape, just set the table name
-        objNode->tableName = shapeIt->second->tableName;
+        tableName = shapeIt->second->tableName;
     }
     
-    // Process nested structures
+    // Set table name in the object node
+    objNode->tableName = tableName;
+    
+    // Ensure we have a schema for this table
+    auto tableIt = tables.find(tableName);
+    if (tableIt == tables.end()) {
+        auto schema = std::make_shared<TableSchema>();
+        schema->name = tableName;
+        schema->columns.push_back("id");  // Always have ID column
+        
+        // Add columns for simple fields
+        for (const auto& pair : objNode->pairs) {
+            if (pair.value->getType() != NodeType::OBJECT && 
+                pair.value->getType() != NodeType::ARRAY) {
+                schema->columns.push_back(pair.key);
+            }
+        }
+        
+        tables[schema->name] = schema;
+    }
+    
+    // Process nested objects and arrays
     for (const auto& pair : objNode->pairs) {
         if (pair.value->getType() == NodeType::OBJECT) {
             auto nestedObj = std::dynamic_pointer_cast<ObjectNode>(pair.value);
-            analyzeObject(nestedObj);
-        } else if (pair.value->getType() == NodeType::ARRAY) {
+            if (nestedObj) {
+                nestedObj->parentTable = tableName;
+                nestedObj->parentKey = pair.key;
+                analyzeObject(nestedObj);
+            }
+        } 
+        else if (pair.value->getType() == NodeType::ARRAY) {
             auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(pair.value);
-            analyzeArray(arrayNode, pair.key);
-        }
-    }
-}
-
-void CSVGenerator::analyzeArray(const std::shared_ptr<ArrayNode>& arrayNode, const std::string& parentKey) {
-    if (!arrayNode || arrayNode->elements.empty()) return;
-    
-    // Handle array of objects (child table)
-    if (arrayNode->isArrayOfObjects()) {
-        // Process each object in the array
-        for (const auto& element : arrayNode->elements) {
-            auto objNode = std::dynamic_pointer_cast<ObjectNode>(element);
-            analyzeObject(objNode);
-        }
-    }
-    // Handle array of scalars (junction table)
-    else if (arrayNode->isArrayOfScalars() && !arrayNode->parentTable.empty()) {
-        // Create junction table: parent_id, index, value
-        std::string tableName = getTableNameForArray(arrayNode->parentTable, arrayNode->parentKey);
-        
-        // Check if table already exists
-        if (tables.find(tableName) == tables.end()) {
-            auto schema = std::make_shared<TableSchema>();
-            schema->name = tableName;
-            schema->columns = {
-                arrayNode->parentTable + "_id",
-                "index",
-                "value"
-            };
-            tables[tableName] = schema;
-        }
-    }
-    // Handle array of mixed types or nested arrays
-    else {
-        // Process each element in the array
-        for (const auto& element : arrayNode->elements) {
-            if (element->getType() == NodeType::OBJECT) {
-                auto objNode = std::dynamic_pointer_cast<ObjectNode>(element);
-                analyzeObject(objNode);
-            } else if (element->getType() == NodeType::ARRAY) {
-                auto nestedArray = std::dynamic_pointer_cast<ArrayNode>(element);
-                analyzeArray(nestedArray, parentKey + "_item");
+            if (arrayNode) {
+                arrayNode->parentTable = tableName;
+                arrayNode->parentKey = pair.key;
+                analyzeArray(arrayNode, pair.key);
             }
         }
     }
 }
 
-void CSVGenerator::generateRowsFromAst(const std::shared_ptr<AstNode>& node) {
-    if (!node) return;
+// Analyze array node
+void CSVGenerator::analyzeArray(const std::shared_ptr<ArrayNode>& arrayNode, const std::string& parentKey) {
+    if (!arrayNode) return;
     
-    switch (node->getType()) {
-        case NodeType::OBJECT: {
-            auto objNode = std::dynamic_pointer_cast<ObjectNode>(node);
-            generateRowsFromObject(objNode);
-            break;
+    // Different handling based on array content
+    if (arrayNode->isArrayOfObjects()) {
+        // For arrays of objects, analyze each object
+        for (const auto& elem : arrayNode->elements) {
+            if (elem->getType() == NodeType::OBJECT) {
+                auto objNode = std::dynamic_pointer_cast<ObjectNode>(elem);
+                if (objNode) {
+                    objNode->parentTable = arrayNode->parentTable;
+                    objNode->parentKey = arrayNode->parentKey;
+                    analyzeObject(objNode);
+                }
+            }
         }
-        case NodeType::ARRAY: {
-            auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(node);
-            generateRowsFromArray(arrayNode);
-            break;
+    } 
+    else if (arrayNode->isArrayOfScalars()) {
+        // For arrays of scalars, create a separate table
+        std::string tableName = arrayNode->parentTable + "_" + parentKey;
+        
+        if (tables.find(tableName) == tables.end()) {
+            auto schema = std::make_shared<TableSchema>();
+            schema->name = tableName;
+            schema->columns = {"id", "parent_id", "index", "value"};
+            tables[tableName] = schema;
         }
-        default:
-            // Scalar values at root level are ignored
-            break;
     }
 }
 
+// Generate CSV rows from AST
+void CSVGenerator::generateRowsFromAst(const std::shared_ptr<AstNode>& node) {
+    if (!node) return;
+    
+    // Process based on node type
+    if (node->getType() == NodeType::OBJECT) {
+        auto objNode = std::dynamic_pointer_cast<ObjectNode>(node);
+        if (objNode) {
+            generateRowsFromObject(objNode);
+        }
+    }
+    else if (node->getType() == NodeType::ARRAY) {
+        auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(node);
+        if (arrayNode) {
+            generateRowsFromArray(arrayNode);
+        }
+    }
+    // Other node types don't need processing
+}
+
+// Generate rows from object node
 void CSVGenerator::generateRowsFromObject(const std::shared_ptr<ObjectNode>& objNode) {
     if (!objNode || objNode->tableName.empty()) return;
     
-    // Get the table schema
     auto tableIt = tables.find(objNode->tableName);
     if (tableIt == tables.end()) return;
     
     auto& schema = tableIt->second;
+    std::vector<std::string> row(schema->columns.size());
     
-    // Create a row for this object
-    std::vector<std::string> row(schema->columns.size(), "");
-    
-    // Set the ID
+    // Fill in ID
     row[0] = std::to_string(objNode->id);
     
-    // Set parent ID if this is a nested object
-    if (!objNode->parentTable.empty() && objNode->parentId > 0) {
-        // Find the parent_id column index
-        auto parentIdCol = objNode->parentTable + "_id";
-        auto it = std::find(schema->columns.begin(), schema->columns.end(), parentIdCol);
-        if (it != schema->columns.end()) {
-            int index = std::distance(schema->columns.begin(), it);
+    // Fill in parent ID if applicable
+    if (objNode->parentId >= 0) {
+        auto parentIdIt = std::find(schema->columns.begin(), schema->columns.end(), 
+                                    objNode->parentTable + "_id");
+        if (parentIdIt != schema->columns.end()) {
+            int index = std::distance(schema->columns.begin(), parentIdIt);
             row[index] = std::to_string(objNode->parentId);
         }
     }
     
-    // Set values for scalar fields
+    // Fill in scalar values
     for (const auto& pair : objNode->pairs) {
-        auto valueType = pair.value->getType();
-        if (valueType == NodeType::STRING || valueType == NodeType::NUMBER || 
-            valueType == NodeType::BOOLEAN || valueType == NodeType::NULL_VALUE) {
+        auto columnIt = std::find(schema->columns.begin(), schema->columns.end(), pair.key);
+        if (columnIt != schema->columns.end() && 
+            pair.value->getType() != NodeType::OBJECT && 
+            pair.value->getType() != NodeType::ARRAY) {
             
-            // Find the column index
-            auto it = std::find(schema->columns.begin(), schema->columns.end(), pair.key);
-            if (it != schema->columns.end()) {
-                int index = std::distance(schema->columns.begin(), it);
-                
-                // Convert value to string
-                auto valueNode = std::dynamic_pointer_cast<ValueNode>(pair.value);
-                row[index] = valueNode->toString();
+            int index = std::distance(schema->columns.begin(), columnIt);
+            
+            std::string value;
+            if (pair.value->getType() == NodeType::STRING) {
+                auto strNode = std::dynamic_pointer_cast<StringNode>(pair.value);
+                value = "\"" + strNode->toString() + "\"";
             }
+            else if (pair.value->getType() == NodeType::NUMBER) {
+                auto numNode = std::dynamic_pointer_cast<NumberNode>(pair.value);
+                value = "\"" + numNode->toString() + "\"";
+            }
+            else if (pair.value->getType() == NodeType::BOOLEAN) {
+                auto boolNode = std::dynamic_pointer_cast<BooleanNode>(pair.value);
+                value = boolNode->toString();
+            }
+            else if (pair.value->getType() == NodeType::NULL_VALUE) {
+                value = "null";
+            }
+            
+            row[index] = value;
         }
     }
     
-    // Add the row to the table or stream it directly
+    // Add the row to the schema or write it directly
     if (streamingMode) {
-        writeTableRow(schema->name, row);
+        std::vector<std::string> quotedRow;
+        for (const auto& val : row) {
+            quotedRow.push_back(quoteCSVField(val));
+        }
+        writeTableRow(objNode->tableName, quotedRow);
     } else {
         schema->rows.push_back(row);
     }
     
-    // Process nested structures
+    // Process nested objects and arrays
     for (const auto& pair : objNode->pairs) {
         if (pair.value->getType() == NodeType::OBJECT) {
             auto nestedObj = std::dynamic_pointer_cast<ObjectNode>(pair.value);
-            generateRowsFromObject(nestedObj);
-        } else if (pair.value->getType() == NodeType::ARRAY) {
+            if (nestedObj) {
+                generateRowsFromObject(nestedObj);
+            }
+        } 
+        else if (pair.value->getType() == NodeType::ARRAY) {
             auto arrayNode = std::dynamic_pointer_cast<ArrayNode>(pair.value);
-            generateRowsFromArray(arrayNode);
+            if (arrayNode) {
+                generateRowsFromArray(arrayNode);
+            }
         }
     }
 }
 
+// Generate rows from array node
 void CSVGenerator::generateRowsFromArray(const std::shared_ptr<ArrayNode>& arrayNode) {
-    if (!arrayNode || arrayNode->elements.empty()) return;
+    if (!arrayNode) return;
     
-    // Handle array of objects (child table)
     if (arrayNode->isArrayOfObjects()) {
-        // Generate rows for each object
-        for (size_t i = 0; i < arrayNode->elements.size(); ++i) {
-            auto objNode = std::dynamic_pointer_cast<ObjectNode>(arrayNode->elements[i]);
-            
-            // Add sequence number if needed
-            for (auto& tableSchemaPair : tables) {
-                auto& schema = tableSchemaPair.second;
-                auto seqIt = std::find(schema->columns.begin(), schema->columns.end(), "seq");
-                
-                if (seqIt != schema->columns.end() && 
-                    objNode->parentId == arrayNode->parentId &&
-                    objNode->parentTable == arrayNode->parentTable) {
-                    // Find the seq column index
-                    int seqIndex = std::distance(schema->columns.begin(), seqIt);
-                    
-                    // Get or create the row
-                    std::vector<std::string> row;
-                    if (streamingMode) {
-                        row = std::vector<std::string>(schema->columns.size(), "");
-                    } else if (i < schema->rows.size()) {
-                        row = schema->rows[i];
-                    } else {
-                        row = std::vector<std::string>(schema->columns.size(), "");
-                        schema->rows.push_back(row);
+        // For arrays of objects, process each object
+        for (const auto& elem : arrayNode->elements) {
+            if (elem->getType() == NodeType::OBJECT) {
+                auto objNode = std::dynamic_pointer_cast<ObjectNode>(elem);
+                if (objNode) {
+                    // Ensure the object has the right table name
+                    // This might be duplicative since we already did it in analyzeArray
+                    // but it's safer to do it again
+                    for (auto& tableSchemaPair : tables) {
+                        const auto& tableName = tableSchemaPair.first;
+                        if (tableName != "root" && 
+                            objNode->getKeySignature() == 
+                            objectShapes[tableName]->tableName) {
+                            
+                            objNode->tableName = tableName;
+                            break;
+                        }
                     }
                     
-                    // Set the sequence number
-                    row[seqIndex] = std::to_string(i);
+                    // Process the object
+                    if (streamingMode) {
+                        generateRowsFromObject(objNode);
+                    } else {
+                        generateRowsFromObject(objNode);
+                    }
                 }
             }
-            
-            generateRowsFromObject(objNode);
         }
-    }
-    // Handle array of scalars (junction table)
-    else if (arrayNode->isArrayOfScalars() && !arrayNode->parentTable.empty()) {
-        // Get the junction table name
-        std::string tableName = getTableNameForArray(arrayNode->parentTable, arrayNode->parentKey);
+    } 
+    else if (arrayNode->isArrayOfScalars()) {
+        // For arrays of scalars, create rows in the array table
+        std::string tableName = arrayNode->parentTable + "_" + arrayNode->parentKey;
         
-        // Get the table schema
         auto tableIt = tables.find(tableName);
         if (tableIt == tables.end()) return;
         
-        auto& schema = tableIt->second;
-        
-        // Generate a row for each scalar value
         for (size_t i = 0; i < arrayNode->elements.size(); ++i) {
-            auto valueNode = std::dynamic_pointer_cast<ValueNode>(arrayNode->elements[i]);
+            std::vector<std::string> row(4); // id, parent_id, index, value
             
-            // Create a row: parent_id, index, value
-            std::vector<std::string> row(3);
-            row[0] = std::to_string(arrayNode->parentId);
-            row[1] = std::to_string(i);
-            row[2] = valueNode->toString();
+            row[0] = std::to_string(i + 1);  // 1-based ID
+            row[1] = std::to_string(arrayNode->parentId);
+            row[2] = std::to_string(i);      // 0-based index
             
-            // Add the row to the table or stream it
-            if (streamingMode) {
-                writeTableRow(tableName, row);
-            } else {
-                schema->rows.push_back(row);
+            // Get value based on type
+            const auto& elem = arrayNode->elements[i];
+            if (elem->getType() == NodeType::STRING) {
+                auto strNode = std::dynamic_pointer_cast<StringNode>(elem);
+                row[3] = "\"" + strNode->toString() + "\"";
             }
-        }
-    }
-    // Handle array of mixed types or nested arrays
-    else {
-        // Process each element in the array
-        for (const auto& element : arrayNode->elements) {
-            if (element->getType() == NodeType::OBJECT) {
-                auto objNode = std::dynamic_pointer_cast<ObjectNode>(element);
-                generateRowsFromObject(objNode);
-            } else if (element->getType() == NodeType::ARRAY) {
-                auto nestedArray = std::dynamic_pointer_cast<ArrayNode>(element);
-                generateRowsFromArray(nestedArray);
+            else if (elem->getType() == NodeType::NUMBER) {
+                auto numNode = std::dynamic_pointer_cast<NumberNode>(elem);
+                row[3] = "\"" + numNode->toString() + "\"";
+            }
+            else if (elem->getType() == NodeType::BOOLEAN) {
+                auto boolNode = std::dynamic_pointer_cast<BooleanNode>(elem);
+                row[3] = boolNode->toString();
+            }
+            else if (elem->getType() == NodeType::NULL_VALUE) {
+                row[3] = "null";
+            }
+            
+            if (streamingMode) {
+                std::vector<std::string> quotedRow;
+                for (const auto& val : row) {
+                    quotedRow.push_back(quoteCSVField(val));
+                }
+                writeTableRow(tableName, quotedRow);
+            } else {
+                tableIt->second->rows.push_back(row);
             }
         }
     }

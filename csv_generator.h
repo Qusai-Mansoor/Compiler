@@ -1,61 +1,72 @@
 #ifndef CSV_GENERATOR_H
 #define CSV_GENERATOR_H
 
-#include "ast.h"
-#include <string>
-#include <map>
-#include <vector>
 #include <fstream>
+#include <map>
+#include <string>
+#include <vector>
 #include <memory>
+#include <sstream>
+#include "ast.h"
 
-// Structure to define a table schema
-struct TableSchema {
-    std::string name;
-    std::vector<std::string> columns;
-    std::vector<std::vector<std::string>> rows;
-};
+// Forward declarations
+struct ObjectShape;
+struct TableSchema;
 
-// Structure to track object shapes for table generation
-struct ObjectShape {
-    std::string signature;   // Sorted keys joined by commas
-    std::string tableName;   // Derived table name
-    std::vector<std::string> columns;  // Column names
-};
-
-// Main CSV generator class
 class CSVGenerator {
 private:
     std::string outputDir;
-    bool streamingMode;  // Whether to stream rows directly to files
-    std::map<std::string, std::shared_ptr<TableSchema>> tables;
-    std::map<std::string, std::shared_ptr<ObjectShape>> objectShapes;
-    std::map<std::string, std::ofstream> tableFiles;  // For streaming mode
+    bool streamingMode;
     
-    // Internal methods for analyzing the AST
+    // Map to store table schemas
+    std::map<std::string, std::shared_ptr<TableSchema>> tables;
+    
+    // Map to track object types/shapes
+    std::map<std::string, std::shared_ptr<ObjectShape>> objectShapes;
+    
+    // Map for open file handles when in streaming mode
+    std::map<std::string, std::unique_ptr<std::ofstream>> tableFiles;
+    
+    // Helper methods for analyzing the AST
     void analyzeAst(const std::shared_ptr<AstNode>& node);
     void analyzeObject(const std::shared_ptr<ObjectNode>& objNode);
     void analyzeArray(const std::shared_ptr<ArrayNode>& arrayNode, const std::string& parentKey);
     
-    // Methods for generating rows
+    // Helper methods for generating CSV rows
     void generateRowsFromAst(const std::shared_ptr<AstNode>& node);
     void generateRowsFromObject(const std::shared_ptr<ObjectNode>& objNode);
     void generateRowsFromArray(const std::shared_ptr<ArrayNode>& arrayNode);
     
-    // Helper methods
-    std::string getTableNameForObjectShape(const std::string& signature);
-    std::string getTableNameForArray(const std::string& parentTable, const std::string& key);
+    // Helper methods for CSV output
     std::string quoteCSVField(const std::string& field);
     void writeTableRow(const std::string& tableName, const std::vector<std::string>& row);
     
+    // Helpers for determining table names
+    std::string getTableNameForObjectShape(const std::string& signature);
+    std::string getTableNameForArray(const std::string& parentTable, const std::string& key);
+    
 public:
-    explicit CSVGenerator(std::string outputDir, bool streaming = true);
+    CSVGenerator(std::string outputDir = "", bool streaming = false);
     ~CSVGenerator();
     
-    // Generate CSV files from the AST
+    // Generate CSV files from AST
     void generateCSV(const AST& ast);
     
-    // Get the list of generated tables (for testing)
+    // Get all table names
     std::vector<std::string> getTableNames() const;
+};
+
+// Structure to represent an object's shape (field names and types)
+struct ObjectShape {
+    std::string tableName;
+    std::map<std::string, NodeType> fields;
+};
+
+// Structure to represent a table schema
+struct TableSchema {
+    std::string name;
+    std::vector<std::string> columns;
+    std::vector<std::vector<std::string>> rows;
 };
 
 #endif // CSV_GENERATOR_H

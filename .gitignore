@@ -22,10 +22,6 @@ obj/
 Debug/
 Release/
 
-# Generated CSV files
-*.csv
-Output/
-
 # IDE and editor files
 .vscode/
 .idea/

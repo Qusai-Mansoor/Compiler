@@ -56,6 +56,7 @@ public:
     int id = -1;           // Assigned row id
     int parentId = -1;     // Parent object's id (for foreign key)
     std::string parentTable; // Parent table name
+    std::string parentKey;   // The key in parent object that points to this object
     
     NodeType getType() const override { return NodeType::OBJECT; }
     void print(std::ostream& os, int indent = 0) const override;
