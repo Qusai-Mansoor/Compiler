@@ -1,0 +1,58 @@
+# Compiled executables
+json2relcsv
+*.exe
+*.out
+*.app
+
+# Object files
+*.o
+*.obj
+*.lo
+*.slo
+
+# Generated parser and lexer files
+lex.yy.c
+parser.tab.c
+parser.tab.h
+
+# Build directories
+build/
+bin/
+obj/
+Debug/
+Release/
+
+# Generated CSV files
+*.csv
+Output/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.vs/
+*.suo
+*.user
+*.userprefs
+*.sublime-workspace
+*.sublime-project
+
+# System files
+.DS_Store
+Thumbs.db
+*.log
+
+# Dependency files
+*.d
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Backup files
+*~
+*.bak
+
+# Core dumps
+core
