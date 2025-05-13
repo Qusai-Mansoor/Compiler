@@ -12,6 +12,7 @@ extern AST ast;
 extern int yyparse();
 extern FILE *yyin;
 extern void reset_scanner();
+extern bool has_syntax_error;
 
 // Flag for printing AST
 bool print_ast = false;
@@ -45,20 +46,31 @@ int main(int argc, char** argv) {
     // Set input source to stdin
     yyin = stdin;
     
-    // Parse the input
-    int parse_result = yyparse();
-    
-    // Check for parsing errors
-    if (parse_result != 0) {
+    try {
+        // Parse the input
+        int parse_result = yyparse();
+        
+        // Check for parsing errors
+        if (parse_result != 0 || has_syntax_error) {
+            std::cerr << "Error: Failed to parse JSON input" << std::endl;
+            return 1;
+        }
+        
+        // Assign IDs to AST nodes
+        ast.assignIds();
+        
+        // Generate CSV files
+        try {
+            CSVGenerator generator(out_dir);
+            generator.generateCSV(ast);
+        } catch (const std::exception& e) {
+            std::cerr << "Error during CSV generation: " << e.what() << std::endl;
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error: " << e.what() << std::endl;
         return 1;
     }
-    
-    // Assign IDs to AST nodes
-    ast.assignIds();
-    
-    // Generate CSV files
-    CSVGenerator generator(out_dir);
-    generator.generateCSV(ast);
     
     return 0;
 }

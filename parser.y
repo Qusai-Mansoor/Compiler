@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <cstdlib>
 #include "ast.h"
 
 // Forward declarations
@@ -19,6 +20,9 @@ AST ast;
 
 // For printing the AST
 extern bool print_ast;
+
+// Error recovery flag
+bool has_syntax_error = false;
 
 %}
 
@@ -54,6 +58,13 @@ json: value {
         ast.print(std::cout);
     }
 }
+| error {
+    has_syntax_error = true;
+    std::cerr << "JSON syntax error, attempting to recover..." << std::endl;
+    // Create a minimal valid AST
+    ast.setRoot(std::make_shared<ObjectNode>());
+    YYABORT;
+}
 ;
 
 value: object    { $$ = $1; }
@@ -63,6 +74,11 @@ value: object    { $$ = $1; }
     | TRUE       { $$ = new BooleanNode(true); }
     | FALSE      { $$ = new BooleanNode(false); }
     | NUL        { $$ = new NullNode(); }
+    | error      { 
+        $$ = new NullNode(); 
+        has_syntax_error = true;
+        std::cerr << "Syntax error in value at line " << lineno << ", column " << column << std::endl;
+    }
 ;
 
 object: '{' pairs '}' {
@@ -74,6 +90,15 @@ object: '{' pairs '}' {
 }
     | '{' '}' {
     $$ = new ObjectNode();
+}
+    | '{' pairs error {
+    $$ = new ObjectNode();
+    if ($2) {
+        $$->pairs = std::move(*$2);
+        delete $2;
+    }
+    has_syntax_error = true;
+    std::cerr << "Missing closing brace in object definition at line " << lineno << std::endl;
 }
 ;
 
@@ -87,11 +112,24 @@ pairs: pair {
     $$->push_back(std::move(*$3));
     delete $3;
 }
+    | pairs error pair {
+    $$ = $1;
+    $$->push_back(std::move(*$3));
+    delete $3;
+    has_syntax_error = true;
+    std::cerr << "Missing comma in object definition at line " << lineno << std::endl;
+}
 ;
 
 pair: STRING ':' value {
     $$ = new KeyValuePair(*$1, std::shared_ptr<AstNode>($3));
     delete $1;
+}
+    | STRING error value {
+    $$ = new KeyValuePair(*$1, std::shared_ptr<AstNode>($3));
+    delete $1;
+    has_syntax_error = true;
+    std::cerr << "Missing colon in key-value pair at line " << lineno << std::endl;
 }
 ;
 
@@ -105,6 +143,15 @@ array: '[' elements ']' {
     | '[' ']' {
     $$ = new ArrayNode();
 }
+    | '[' elements error {
+    $$ = new ArrayNode();
+    if ($2) {
+        $$->elements = std::move(*$2);
+        delete $2;
+    }
+    has_syntax_error = true;
+    std::cerr << "Missing closing bracket in array definition at line " << lineno << std::endl;
+}
 ;
 
 elements: value {
@@ -115,10 +162,17 @@ elements: value {
     $$ = $1;
     $$->push_back(std::shared_ptr<AstNode>($3));
 }
+    | elements error value {
+    $$ = $1;
+    $$->push_back(std::shared_ptr<AstNode>($3));
+    has_syntax_error = true;
+    std::cerr << "Missing comma in array elements at line " << lineno << std::endl;
+}
 ;
 
 %%
 
 void yyerror(const char *s) {
     fprintf(stderr, "Error: %s at line %d, column %d\n", s, lineno, column);
+    has_syntax_error = true;
 }

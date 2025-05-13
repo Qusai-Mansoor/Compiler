@@ -1,8 +1,7 @@
 {
-    "person": {
-        "name": "Bob",
-        "age": 30
-    },
-    "hobbies": ["reading", "gaming", "hiking"],
-    "city": "Seattle"
-}
+    " orderId ": 7 ,
+    " items ": [
+    {" sku ": " X1 " , " qty ": 2} ,
+    {" sku ": " Y9 " , " qty ": 1}
+    ]
+    }

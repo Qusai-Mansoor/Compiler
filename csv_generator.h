@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <sstream>
+#include <set>
 #include "ast.h"
 
 // Forward declarations
@@ -27,10 +28,22 @@ private:
     // Map for open file handles when in streaming mode
     std::map<std::string, std::unique_ptr<std::ofstream>> tableFiles;
     
+    // Set of tables that were merged into other tables
+    std::set<std::string> mergedTables;
+    
+    // Maps for tracking parent-child relationships
+    std::map<std::string, std::vector<std::string>> objArrayMappings;
+    std::map<std::string, std::vector<std::string>> scalarArrayMappings;
+    
     // Helper methods for analyzing the AST
     void analyzeAst(const std::shared_ptr<AstNode>& node);
     void analyzeObject(const std::shared_ptr<ObjectNode>& objNode);
     void analyzeArray(const std::shared_ptr<ArrayNode>& arrayNode, const std::string& parentKey);
+    
+    // Table name and relationship management
+    void renameTablesBasedOnContent();
+    void processRelationships();
+    void mergeTable(const std::string& sourceTable, const std::string& targetTable);
     
     // Helper methods for generating CSV rows
     void generateRowsFromAst(const std::shared_ptr<AstNode>& node);

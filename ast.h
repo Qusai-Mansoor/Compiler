@@ -57,6 +57,7 @@ public:
     int parentId = -1;     // Parent object's id (for foreign key)
     std::string parentTable; // Parent table name
     std::string parentKey;   // The key in parent object that points to this object
+    int arrayIndex = -1;    // Array index if this is an array element
     
     NodeType getType() const override { return NodeType::OBJECT; }
     void print(std::ostream& os, int indent = 0) const override;
